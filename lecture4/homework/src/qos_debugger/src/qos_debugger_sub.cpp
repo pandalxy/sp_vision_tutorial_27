@@ -19,7 +19,7 @@ public:
   {
     this->declare_parameter("reliability", "reliable");
     this->declare_parameter("depth", 10);
-    this->declare_parameter("callback_delay_ms", 30);
+    this->declare_parameter("callback_delay_ms", 0);
 
     reliability_ = this->get_parameter("reliability").as_string();
     depth_ = this->get_parameter("depth").as_int();
@@ -96,6 +96,7 @@ private:
     else if (msg->seq > expected_seq_)
     {
       const uint32_t lost = msg->seq - expected_seq_;
+      lost_count_ += lost;
       RCLCPP_WARN(
           this->get_logger(),
           "检测到丢包: 期望 seq=%u, 实际 seq=%u, 丢失 %u 条",
@@ -130,8 +131,18 @@ private:
 
     /*
     在这之间加入计算帧率并打印的代码
-
     */
+    // 帧率 = 这一秒内新收到的消息数 / 实际经过的时间
+    auto now = std::chrono::steady_clock::now();
+    double elapsed_seconds =
+        std::chrono::duration<double>(now - last_report_time_).count();
+    if (elapsed_seconds > 0.0)
+    {
+      double fps = static_cast<double>(received_count_ - last_received_count_) / elapsed_seconds;
+      RCLCPP_INFO(this->get_logger(), "接收帧率: %.1f Hz", fps);
+    }
+    last_received_count_ = received_count_;
+    last_report_time_ = now;
   }
 
   rclcpp::Subscription<nav_hw_interfaces::msg::SensorData>::SharedPtr subscription_;
