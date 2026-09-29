@@ -54,7 +54,6 @@ ros2 -h     //有忘记的命令就输入-h去查询用法
 
 在下面按顺序完成三个任务，要求把用到的命令放入代码块中并讲解命令，每一问最好加入自己的理解
 
----
 
 ## 任务一：实现 pub 和 sub 的通信
 
@@ -67,38 +66,33 @@ ros2 run qos_debugger qos_debugger_pub   # 终端 A：发布者
 ros2 run qos_debugger qos_debugger_sub   # 终端 B：订阅者
 ```
 
+
 `ros2 run` 表示「运行某个包里的某个节点」，`ros2 run <包名> <可执行文件名>`。启动后 sub 终端一片安静，**一条消息都收不到**，而 pub 终端一直在正常发布。
-
-### 排查命令
-
 收不到消息时，用话题相关的命令一层层查：
 
 ```bash
-ros2 topic list                            # ① 查看当前有哪些话题在跑
-ros2 topic info /sensor_data               # ② 查看该话题上连着几个发布者/订阅者
-ros2 topic info /sensor_data --verbose     # ③ 关键！显示双方 QoS 配置和是否兼容
-ros2 topic echo /sensor_data               # ④ 直接打印话题上的数据（相当于临时订阅者）
+ros2 topic list                            # 1.查看当前有哪些话题在跑
+ros2 topic info /sensor_data               # 2.查看该话题上连着几个发布者/订阅者
+ros2 topic info /sensor_data --verbose     # 3.显示双方 QoS 配置和是否兼容
+ros2 topic echo /sensor_data               # 4.直接打印话题上的数据
 ```
 
+
 - `ros2 topic list`：列出所有话题，确认 `/sensor_data` 这个「频道」确实存在；
-- `ros2 topic info`：能看到话题上 Pub 有 1 个、Sub 有 1 个，说明两个节点确实都连到了同一个话题上，但就是不通信；
-- `ros2 topic info --verbose`（加 `-v` 也可）：能看到 QoS 兼容性检查结果，会明确显示 `reliability` 一项**不兼容（Incompatible）**——这就是问题所在；
-- `ros2 topic echo`：直接打印话题数据，如果通信正常，这里会不断刷出消息；此时刷不出任何东西，进一步佐证通信断了。
+- `ros2 topic info`：能看到话题上 Pub 有 1 个、Sub 有 1 个，说明两个节点确实都连到了同一个话题上，但是不通信；
+- `ros2 topic info /sensor_data --verbose`（加 `-v` 也可）：能看到 QoS 兼容性检查结果，会明确显示 `reliability` 不兼容（Incompatible）；
+- `ros2 topic echo`：直接打印话题数据，如果通信正常，这里会不断刷出消息；此时刷不出任何东西，就是通信断了。
 
 ### 原因分析
 
-QoS（Quality of Service，通信质量策略）是发布者和订阅者之间必须「对得上」的传输约定，其中一项是 **reliability（可靠性）**：
+QoS是发布者和订阅者之间必须「对得上」的传输约定，其中一项是 reliability（可靠性）：
 
-| 策略 | 含义 | 类比 |
-|------|------|------|
-| `reliable` | 保证每条消息都送到，送不到会重传 | 点外卖：饭必须送到我手上 |
-| `best_effort` | 尽力发，网络不稳就丢，不重传 | 接推销电话：漏接了也无所谓 |
 
-**规则：reliable 只能和 reliable 配对，best_effort 只能和 best_effort 配对。** 本题中 pub 的默认参数是 `best_effort`，sub 的默认参数是 `reliable`——一个说「我不保证送到」，另一个说「你必须保证送到」，协议对不上，DDS 中间件直接拒绝建立连接，所以 sub 一条消息也收不到。
+规则：reliable 只能和 reliable 配对，best_effort 只能和 best_effort 配对。本题中 pub 的默认参数是 `best_effort`，sub 的默认参数是 `reliable`，协议对不上，DDS 中间件直接拒绝建立连接，所以 sub 一条消息也收不到。
 
 ### 修复方法
 
-任务一要求只改 `qos_debugger_pub.cpp`，把发布者默认的可靠性改成 `reliable`，与订阅者对齐：
+把发布者默认的可靠性改成 `reliable`，与订阅者一致：
 
 ```cpp
 // src/qos_debugger/src/qos_debugger_pub.cpp
@@ -113,19 +107,16 @@ colcon build               # 编译工作空间
 source install/setup.bash  # 让当前终端能找到编译好的可执行文件
 ```
 
-`colcon build` 把 `src/` 下的源码编译成可执行文件放到 `install/`；`source install/setup.bash` 把 `install/` 加入环境变量，否则 `ros2 run` 找不到新编译的节点。**每次改完代码都要走这两步。**
-
 ### 验证
 
-再次运行 `ros2 topic info /sensor_data -v`，reliability 显示 `Compatible`（兼容）；sub 终端开始不断打印 `收到 seq=...`，任务一完成。
+再次运行 `ros2 topic info /sensor_data -v`，reliability 显示 Compatible（兼容）；sub 终端开始不断打印 `收到 seq=...`，
 
----
 
 ## 任务二：为什么收到的消息会丢包？
 
 ### 现象
 
-通信恢复后，sub 终端会打出**黄色 WARN**，告诉我们丢了哪些序列，比如：
+通信恢复后，sub 终端会打出黄色 WARN，告诉我们丢了哪些序列，比如：
 
 ```
 [WARN] [sensor_subscriber]: 检测到丢包: 期望 seq=5, 实际 seq=8, 丢失 3 条
@@ -133,89 +124,71 @@ source install/setup.bash  # 让当前终端能找到编译好的可执行文件
 
 每秒还会打印一行累计统计（丢包率）。
 
-### 排查命令
-
-怀疑是节点自身的配置有问题，用参数命令查：
-
 ```bash
-ros2 param list                                     # ① 列出节点的所有参数
-ros2 param get /sensor_subscriber callback_delay_ms # ② 查看某个参数当前的值
-ros2 param describe /sensor_subscriber callback_delay_ms  # ③ 查看参数的类型/说明
+ros2 param list
+ros2 param get /sensor_subscriber callback_delay_ms
+ros2 param describe /sensor_subscriber callback_delay_ms
 ```
 
-- `ros2 param list`：列出 `/sensor_subscriber` 节点的全部参数（reliability、depth、callback_delay_ms）；
-- `ros2 param get`：查看某个参数的**当前值**。这里查出 `callback_delay_ms` 的值是 30；
-- `ros2 param describe`：看参数的元信息（类型、取值范围等）。
+
+- `ros2 param list`：列出 `/sensor_subscriber` 节点的全部参数；
+- `ros2 param get`：查看某个参数的当前值。这里查出 `callback_delay_ms` 的值是 30；
+- `ros2 param describe`：看参数的元信息。
 
 ### 原因分析
 
-sub 的回调函数里故意睡了一觉：
+sub 的回调函数故意加暂停指令：
 
 ```cpp
-std::this_thread::sleep_for(std::chrono::milliseconds(callback_delay_ms_));  // 默认 30ms
+std::this_thread::sleep_for(std::chrono::milliseconds(callback_delay_ms_));
 ```
 
-而 pub 以 **100Hz**（每 10ms 一条）的速度发消息。算一笔账：
+
+而 pub 以 100Hz（每 10ms 一条）的速度发消息。那么：
 
 - 消息到达速度：100 条/秒（每 10ms 一条）
-- 回调处理速度：每处理一条要睡 30ms，最快约 33 条/秒
-- 队列大小：`depth = 10`
+- 回调处理速度：每处理一条要停 30ms，最快约 33 条/秒
+- 队列大小：depth = 10
 
 处理速度远跟不上到达速度，消息在订阅端的队列里越积越多；队列（只保留最新 10 条）塞满后，新消息进不来、旧消息被挤掉，seq 就出现跳号，也就是丢包。
-
-**我的理解**：这就像收银台排队——顾客（消息）源源不断来得很快，收银员（回调函数）每单却磨磨蹭蹭，队伍（队列）排满后，后来的顾客只能走人（丢包）。顺便说一句，只把 `depth` 调大只能让丢包晚一点发生，治标不治本，因为「处理不过来」这个根本矛盾还在。
 
 ### 修复方法
 
 修改 `qos_debugger_sub.cpp` 两处：
 
 ```cpp
-// ① 把回调人为延时改成 0，处理速度跟上发布速度
-this->declare_parameter("callback_delay_ms", 0);   // 原来是 30
+this->declare_parameter("callback_delay_ms", 0);
 
-// ② 检测到丢包时，把丢失的数量累加进 lost_count_（原来漏了这行，
-//    导致每秒打印的丢包率永远是 0.00%）
 const uint32_t lost = msg->seq - expected_seq_;
 lost_count_ += lost;
 ```
-
-另外，这个参数也支持**运行时修改、不用重新编译**：
-
-```bash
-ros2 param set /sensor_subscriber callback_delay_ms 0
-```
-
-`ros2 param set` 直接改正在运行的节点的参数，节点里注册的参数回调会立即生效（可以把它改回 30 试试，丢包立刻重新出现，很直观）。
 
 ### 验证
 
 重新 `colcon build` + `source install/setup.bash` 后再跑，WARN 消失，每秒统计为：
 
 ```
-累计: 收到 500 条, 丢失 0 条, 丢包率 0.00%
+累计: 收到 50 条, 丢失 0 条, 丢包率 0%
 ```
 
-任务二完成。
-
----
 
 ## 任务三：计算并打印接收帧率
 
 ### 思路
 
-帧率的定义：**一段时间内收到多少条消息**。report() 是每秒触发一次的定时器回调，正好用它来统计。类里已经预留了两个成员变量：
+report() 是每秒触发一次的定时器回调，用它来统计。类里已经预留了两个成员变量：
 
 ```cpp
-uint32_t last_received_count_{0};   // 上一次报告时累计收到多少条
-std::chrono::steady_clock::time_point last_report_time_{...};  // 上一次报告的时刻
+uint32_t last_received_count_{0};
+std::chrono::steady_clock::time_point last_report_time_{...};
 ```
 
 ### 代码
 
-在 `qos_debugger_sub.cpp` 的 `report()` 函数中补上：
+在 `qos_debugger_sub.cpp` 中补上：
 
 ```cpp
-// 帧率 = 这一秒内新收到的消息数 / 实际经过的时间
+
 auto now = std::chrono::steady_clock::now();
 double elapsed_seconds =
     std::chrono::duration<double>(now - last_report_time_).count();
