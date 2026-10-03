@@ -49,10 +49,11 @@ controller_server:
       speed_horizon: 3.0
       decel_accel: 1.8
       pred_latency: 0.06
-      wall_brake_dist: 0.0
+      lock_nav_pose: true
+      wall_brake_dist: 0.5
       wall_speed_gain: 2.0
-      goal_gain: 1.0
-      goal_end_vel: 0.05
+      goal_gain: 1.6
+      goal_end_vel: 0.03
       stop_dist: 0.03
       shortcut_dev: 0.15
       smooth_window: 7

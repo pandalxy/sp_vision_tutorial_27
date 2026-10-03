@@ -10,6 +10,8 @@
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
+#include <robot_msg/msg/gimbal_control_msg.hpp>
+#include <robot_msg/msg/chassis_mode_msg.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <tf2_ros/buffer.h>
 
@@ -52,8 +54,10 @@ private:
   void processPlan();
   // 在路径上找离 (x,y) 最近的点下标（全路径线性扫描，路径只有几百个点）
   std::size_t findNearestIndex(double x, double y) const;
-  // 从 from 点沿路径前进 lookahead 弧长，返回前瞻点（必要时插值）
-  Point findLookahead(std::size_t from, double lookahead, bool & at_end) const;
+  // 从 from 点沿路径前进 lookahead 弧长，返回前瞻点（必要时插值）；
+  // seg_idx 输出前瞻点所在路径段下标
+  Point findLookahead(std::size_t from, double lookahead, bool & at_end,
+                      std::size_t * seg_idx = nullptr) const;
   // 曲率限速剖面：沿路径采样局部曲率得到每点限速，
   // 再按减速能力从远到近收紧，返回当前位置允许的速度
   double speedProfile(std::size_t from, double v_goal) const;
@@ -74,6 +78,13 @@ private:
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr local_path_pub_;
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr debug_pub_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr esdf_sub_;
+  // 导航姿态：底盘跟随云台参考角（= 路径朝向），像车一样让车体
+  // 始终顺着走廊方向（方形车体横向占地恒为 0.5 m，所有走廊都能过）
+  rclcpp::Publisher<robot_msg::msg::GimbalControlMsg>::SharedPtr gimbal_pub_;
+  rclcpp::Publisher<robot_msg::msg::ChassisModeMsg>::SharedPtr chassis_pub_;
+  bool lock_nav_pose_{true};      // 是否在导航期间控制云台/底盘姿态
+  double last_pub_heading_deg_{0.0};
+  void publishNavPose();
 
   // ESDF 代价地图（/esdf_costmap：data = 净空距离*100 的 int8 栅格）
   nav_msgs::msg::OccupancyGrid esdf_;

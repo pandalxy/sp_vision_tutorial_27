@@ -6,6 +6,7 @@
 
 #include <rclcpp/exceptions.hpp>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <sstream>
@@ -108,9 +109,34 @@ void PidController::configure(
       has_esdf_ = true;
     });
 
+  // 导航姿态：底盘跟随云台参考角（云台参考角由控制器设为路径朝向）。
+  // 仿真器里底盘是 0.5 m 方形且默认以 3 rad/s 自旋，一旦贴墙（净空 < 外接圆
+  // 0.354 m）就会永久卡死。让车体始终顺着走廊方向（横向占地 0.5 m），
+  // 贴墙也只会轻微剐蹭、可自行恢复。
+  lock_nav_pose_ = param_with_default(node_, ns + "lock_nav_pose", lock_nav_pose_);
+  if (lock_nav_pose_) {
+    gimbal_pub_ = node_->create_publisher<robot_msg::msg::GimbalControlMsg>("/gimbal/control", 1);
+    chassis_pub_ = node_->create_publisher<robot_msg::msg::ChassisModeMsg>("/chassis/mode", 1);
+    publishNavPose();
+  }
+
   RCLCPP_INFO(node_->get_logger(),
-    "[%s] configured: kp=%.2f ki=%.2f kd=%.2f lookahead=%.2f+%.2f*v max_vel=%.2f",
-    plugin_name_.c_str(), kp_, ki_, kd_, lookahead_base_, lookahead_gain_, max_vel_);
+    "[%s] configured: kp=%.2f ki=%.2f kd=%.2f lookahead=%.2f+%.2f*v max_vel=%.2f lock_nav_pose=%d",
+    plugin_name_.c_str(), kp_, ki_, kd_, lookahead_base_, lookahead_gain_, max_vel_,
+    lock_nav_pose_ ? 1 : 0);
+}
+
+void PidController::publishNavPose()
+{
+  robot_msg::msg::GimbalControlMsg gimbal;
+  gimbal.mode = 3;          // yaw 指定角度
+  gimbal.big_yaw = 0.0f;    // 云台转到 0°，底盘跟随到 0° 后车体与地图轴对齐
+  robot_msg::msg::ChassisModeMsg chassis;
+  chassis.mode = 1;         // 底盘跟随云台（云台定住后底盘不再自旋）
+  chassis.is_stop = false;
+  chassis.rotate_velocity = 0.0f;
+  if (gimbal_pub_) gimbal_pub_->publish(gimbal);
+  if (chassis_pub_) chassis_pub_->publish(chassis);
 }
 
 double PidController::distPointToSegment(
@@ -249,7 +275,7 @@ std::size_t PidController::findNearestIndex(double x, double y) const
 }
 
 PidController::Point PidController::findLookahead(
-  std::size_t from, double lookahead, bool & at_end) const
+  std::size_t from, double lookahead, bool & at_end, std::size_t * seg_idx) const
 {
   at_end = false;
   const std::size_t n = plan_.poses.size();
@@ -260,6 +286,7 @@ PidController::Point PidController::findLookahead(
     if (arc_[i] >= target) {
       const double seg_len = arc_[i] - arc_[i - 1];
       const double t = (seg_len > 1e-12) ? (target - arc_[i - 1]) / seg_len : 0.0;
+      if (seg_idx) *seg_idx = i - 1;
       return {
         plan_.poses[i - 1].pose.position.x +
           t * (plan_.poses[i].pose.position.x - plan_.poses[i - 1].pose.position.x),
@@ -268,6 +295,7 @@ PidController::Point PidController::findLookahead(
     }
   }
   at_end = true;
+  if (seg_idx) *seg_idx = n - 2;
   return {plan_.poses.back().pose.position.x, plan_.poses.back().pose.position.y};
 }
 
@@ -386,7 +414,29 @@ geometry_msgs::msg::TwistStamped PidController::computeVelocityCommands(
   const double speed_now = std::hypot(velocity.linear.x, velocity.linear.y);
   const double lookahead = lookahead_base_ + lookahead_gain_ * speed_now;
   bool at_end = false;
-  const Point la = findLookahead(near_idx, lookahead, at_end);
+  std::size_t la_seg = 0;
+  const Point la = findLookahead(near_idx, lookahead, at_end, &la_seg);
+
+  // 导航姿态：把云台参考角设为前瞻点处的路径朝向，底盘(mode=1)跟随，
+  // 车体始终顺着走廊方向。只在朝向变化超过 10° 时更新参考角，
+  // 避免频繁跳变（云台 mode=3 是瞬时设置，跳变会短暂干扰速度指令系）
+  if (lock_nav_pose_ && gimbal_pub_ && heading_.size() > la_seg) {
+    const double la_heading_deg = heading_[la_seg] * 180.0 / M_PI;
+    if (std::fabs(angleDiff(la_heading_deg * M_PI / 180.0,
+                            last_pub_heading_deg_ * M_PI / 180.0)) > 10.0 * M_PI / 180.0)
+    {
+      robot_msg::msg::GimbalControlMsg gimbal;
+      gimbal.mode = 3;                    // yaw 指定角度
+      gimbal.big_yaw = static_cast<float>(la_heading_deg);
+      robot_msg::msg::ChassisModeMsg chassis;
+      chassis.mode = 1;                   // 底盘跟随云台
+      chassis.is_stop = false;
+      chassis.rotate_velocity = 0.0f;
+      gimbal_pub_->publish(gimbal);
+      chassis_pub_->publish(chassis);
+      last_pub_heading_deg_ = la_heading_deg;
+    }
+  }
 
   const double ex = la.x - x;
   const double ey = la.y - y;
@@ -407,6 +457,24 @@ geometry_msgs::msg::TwistStamped PidController::computeVelocityCommands(
     if (d < wall_brake_dist_) {
       const double v_wall = 0.5 + wall_speed_gain_ * std::max(0.0, d - 0.35);
       v_limit = std::min(v_limit, std::max(0.3, v_wall));
+    }
+
+    // 速度方向前瞻刹车：过弯时 plant 的速度方向滞后于指令方向，
+    // 实际速度仍指向弯道外侧的墙袋。沿当前速度方向向前采样净空，
+    // 若即将撞墙则提前急刹，避免楔死（直线行驶时不受影响）。
+    const double vx_now = velocity.linear.x;
+    const double vy_now = velocity.linear.y;
+    const double v_now = std::hypot(vx_now, vy_now);
+    if (v_now > 0.3) {
+      const double dir_x = vx_now / v_now;
+      const double dir_y = vy_now / v_now;
+      const double check = std::max(0.25, 0.35 * v_now);   // 前瞻距离随速度增大
+      const double d_ahead =
+        std::min(esdfClearance(x + dir_x * check, y + dir_y * check),
+                 esdfClearance(x + dir_x * check * 0.6, y + dir_y * check * 0.6));
+      if (d_ahead < 0.40) {
+        v_limit = std::min(v_limit, 0.5);
+      }
     }
   }
 
