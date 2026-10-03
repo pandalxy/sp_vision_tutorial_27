@@ -188,6 +188,10 @@ void ControllerServer::controlLoop()
   }
 
   if (path_copy.poses.empty()) {
+    // 没有路径时也持续发布零速：仿真器若连续 5 s 收不到 cmd_vel
+    // 会转入“拖拽目标”自主行走，机器人会直冲仿真器窗口里点击的位置撞墙。
+    geometry_msgs::msg::Twist zero;
+    cmd_vel_pub_->publish(zero);
     return;
   }
 
