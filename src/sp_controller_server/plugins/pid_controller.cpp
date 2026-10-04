@@ -634,7 +634,10 @@ geometry_msgs::msg::TwistStamped PidController::computeVelocityCommands(
   bool escaping = false;
   if (has_esdf_) {
     const double c_self = esdfClearance(x, y);
-    if (speed_now < 0.12 && v_limit > 0.25) {
+    // 卡死判定只看「实际不动 + 贴墙」，不依赖 v_limit——
+    // 停摆刹车会把 v_limit 置 0，若条件含 v_limit 则脱困永远无法触发，
+    // 两个保护机制互相压制，机器人卡死在墙边。
+    if (speed_now < 0.12 && c_self < escape_clear_dist_) {
       if (stuck_since_.nanoseconds() == 0) {
         stuck_since_ = now;
       } else if ((now - stuck_since_).seconds() > stuck_time_) {
