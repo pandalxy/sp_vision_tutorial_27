@@ -35,7 +35,9 @@ T require_param(const rclcpp::Node::SharedPtr & node, const std::string & name)
   }
 }
 
-// 带默认值的参数读取：yaml 里没写就用默认值
+// 带默认值的参数读取：yaml 里没写就用默认值。
+// 注意：launch 传的参数在节点里以 override 形式存在（has_parameter 可能为
+// false），declare 后必须回读——否则 override 值被忽略、一直用默认值。
 template<typename T>
 T param_with_default(const rclcpp::Node::SharedPtr & node, const std::string & name, const T & def)
 {
@@ -43,7 +45,7 @@ T param_with_default(const rclcpp::Node::SharedPtr & node, const std::string & n
     return node->get_parameter(name).get_value<T>();
   }
   node->declare_parameter<T>(name, def);
-  return def;
+  return node->get_parameter(name).get_value<T>();
 }
 
 // 角度差归一化到 [-pi, pi]
@@ -75,6 +77,10 @@ void PidController::configure(
 
   // 控制器参数（未在 yaml 中填写的使用默认值）
   const std::string ns = plugin_name_ + ".";
+  RCLCPP_INFO(node_->get_logger(),
+    "[%s] param probe: has=%d node_name=%s",
+    plugin_name_.c_str(),
+    node_->has_parameter(ns + "kp") ? 1 : 0, node_->get_name());
   kp_               = param_with_default(node_, ns + "kp", kp_);
   ki_               = param_with_default(node_, ns + "ki", ki_);
   kd_               = param_with_default(node_, ns + "kd", kd_);
@@ -87,6 +93,8 @@ void PidController::configure(
   decel_accel_      = param_with_default(node_, ns + "decel_accel", decel_accel_);
   goal_gain_        = param_with_default(node_, ns + "goal_gain", goal_gain_);
   goal_end_vel_     = param_with_default(node_, ns + "goal_end_vel", goal_end_vel_);
+  goal_decel_       = param_with_default(node_, ns + "goal_decel", goal_decel_);
+  goal_lag_         = param_with_default(node_, ns + "goal_lag", goal_lag_);
   stop_dist_        = param_with_default(node_, ns + "stop_dist", stop_dist_);
   shortcut_dev_     = param_with_default(node_, ns + "shortcut_dev", shortcut_dev_);
   smooth_window_    = param_with_default(node_, ns + "smooth_window", smooth_window_);
@@ -105,6 +113,14 @@ void PidController::configure(
   min_path_clearance_ = param_with_default(node_, ns + "min_path_clearance", min_path_clearance_);
   gap_crawl_dist_ = param_with_default(node_, ns + "gap_crawl_dist", gap_crawl_dist_);
   gap_crawl_speed_ = param_with_default(node_, ns + "gap_crawl_speed", gap_crawl_speed_);
+  decel_lag_dist_ = param_with_default(node_, ns + "decel_lag_dist", decel_lag_dist_);
+  pocket_check_dist_ = param_with_default(node_, ns + "pocket_check_dist", pocket_check_dist_);
+  pocket_clearance_ = param_with_default(node_, ns + "pocket_clearance", pocket_clearance_);
+  pocket_speed_ = param_with_default(node_, ns + "pocket_speed", pocket_speed_);
+  stuck_time_ = param_with_default(node_, ns + "stuck_time", stuck_time_);
+  escape_clear_dist_ = param_with_default(node_, ns + "escape_clear_dist", escape_clear_dist_);
+  escape_speed_ = param_with_default(node_, ns + "escape_speed", escape_speed_);
+  pose_step_arc_ = param_with_default(node_, ns + "pose_step_arc", pose_step_arc_);
   esdf_sub_ = node_->create_subscription<nav_msgs::msg::OccupancyGrid>(
     "/esdf_costmap", rclcpp::QoS(1).reliable(),
     [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
@@ -128,14 +144,17 @@ void PidController::configure(
     "[%s] configured: kp=%.2f ki=%.2f kd=%.2f lookahead=%.2f+%.2f*v max_vel=%.2f lock_nav_pose=%d",
     plugin_name_.c_str(), kp_, ki_, kd_, lookahead_base_, lookahead_gain_, max_vel_,
     lock_nav_pose_ ? 1 : 0);
+  RCLCPP_INFO(node_->get_logger(),
+    "[%s] pocket: check_dist=%.2f clearance=%.2f speed=%.2f lag=%.2f a_lat=%.2f",
+    plugin_name_.c_str(), pocket_check_dist_, pocket_clearance_, pocket_speed_,
+    decel_lag_dist_, corner_lat_accel_);
 }
 
 void PidController::publishNavPose()
 {
-  last_pub_heading_rad_ = 0.0;
   robot_msg::msg::GimbalControlMsg gimbal;
   gimbal.mode = 3;          // yaw 指定角度
-  gimbal.big_yaw = 0.0f;    // 云台转到 0°，底盘跟随到 0° 后车体与地图轴对齐
+  gimbal.big_yaw = static_cast<float>(last_pub_heading_rad_ * 180.0 / M_PI);
   robot_msg::msg::ChassisModeMsg chassis;
   chassis.mode = 1;         // 底盘跟随云台（云台定住后底盘不再自旋）
   chassis.is_stop = false;
@@ -337,10 +356,15 @@ double PidController::esdfClearance(double x, double y) const
 
 double PidController::speedProfile(std::size_t from, double v_goal) const
 {
-  // 沿路径每 0.1 m 采样一点，用前后 ±0.15 m 的朝向变化估计该点局部曲率，
-  // 得到该点允许的最大速度（向心加速度不超过 corner_lat_accel_，
-  // 与仿真 plant 的加速度上限一致，plant 能实际跟踪）。
-  // 再从远到近按 decel_accel_ 的减速能力收紧，保证弯前刹得住。
+  // 沿路径每 0.1 m 采样一点：
+  // 1) 用前后 ±0.15 m 的朝向变化估计该点局部曲率，得到允许的最大速度
+  //    （向心加速度不超过 corner_lat_accel_，与仿真 plant 加速度上限一致）；
+  // 2) 口袋检测：沿该点方向前方 pocket_check_dist_ 净空 < pocket_clearance_
+  //    说明弯道外侧有墙袋（或对角窄道），该点限速 pocket_speed_ 蠕行——
+  //    plant 方向滞后 ~0.55 s，低速下超调只有 ~0.22 m，任何口袋都安全；
+  // 3) 从远到近按 decel_accel_ 收紧，并给约束点前移 decel_lag_dist_：
+  //    plant 的速度响应同样有 ~0.5 s 滞后，减速指令晚生效，实际入弯速度
+  //    远高于运动学剖面——约束前移让实际速度在到弯前就降到目标值。
   const double ds = 0.1;
   const double win = 0.15;
   const std::size_t n = arc_.size();
@@ -365,14 +389,42 @@ double PidController::speedProfile(std::size_t from, double v_goal) const
     const double turn = std::fabs(angleDiff(heading_[hi], heading_[lo]));
     const double kappa = turn / arc_span;
     v_at[i] = std::min(max_vel_, std::sqrt(corner_lat_accel_ / std::max(kappa, 1e-4)));
+
+    // 口袋检测：仅当「前方 0.5 m 内确实有转角」时，沿当前行进方向
+    // （plant 滞后时机器人过弯会继续冲的方向）探测墙距。
+    // 探测点 0.5 m 处净空 < pocket_clearance_ 说明墙距 < ~0.65 m
+    // （真墙袋），蠕行通过；普通弯道外侧墙距 0.7 m，不触发——
+    // 普通弯道靠弯速 √(corner_lat_accel/κ) 与滞后补偿减速保证安全。
+    if (has_esdf_) {
+      std::size_t idx_fwd = idx;
+      const double arc_fwd = std::min(arc_target + 0.5, arc_.back());
+      while (idx_fwd + 1 < n && arc_[idx_fwd] < arc_fwd) ++idx_fwd;
+      const double turn_ahead = std::fabs(angleDiff(heading_[idx_fwd], heading_[idx]));
+      if (turn_ahead > 0.20) {
+        const double h = heading_[idx];
+        const double px = plan_.poses[idx].pose.position.x;
+        const double py = plan_.poses[idx].pose.position.y;
+        const double d_probe = esdfClearance(
+          px + std::cos(h) * pocket_check_dist_,
+          py + std::sin(h) * pocket_check_dist_);
+        if (d_probe < pocket_clearance_) {
+          v_at[i] = std::min(v_at[i], pocket_speed_);
+          RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+            "[pocket] crawl at path point (%.2f, %.2f) probe_clr=%.2f", px, py, d_probe);
+        }
+      }
+    }
   }
 
-  // 反向收紧：从最远采样点向当前位置传播减速约束
+  // 反向收紧（含 plant 速度响应滞后补偿）：对每个采样点 i，
+  // 前方每个约束点 j 都要求其目标速度能在 (距离 - decel_lag_dist_) 内减到
   double v_limit = max_vel_;
-  double v_next = v_at.back();
-  for (int i = samples - 2; i >= 0; --i) {
-    v_at[i] = std::min(v_at[i], std::sqrt(v_next * v_next + 2.0 * decel_accel_ * ds));
-    v_next = v_at[i];
+  for (int i = samples - 1; i >= 0; --i) {
+    for (int j = i + 1; j < samples; ++j) {
+      const double d = (j - i) * ds;
+      v_at[i] = std::min(v_at[i], std::sqrt(
+        v_at[j] * v_at[j] + 2.0 * decel_accel_ * std::max(0.0, d - decel_lag_dist_)));
+    }
   }
   v_limit = std::min(max_vel_, v_at.front());
   return v_limit;
@@ -442,39 +494,79 @@ geometry_msgs::msg::TwistStamped PidController::computeVelocityCommands(
   std::size_t la_seg = 0;
   const Point la = findLookahead(near_idx, lookahead, at_end, &la_seg);
 
+  // 2.5) 物理停摆检测：odom 速度非零但位置长时间不动，说明仿真器 GUI
+  // 循环在 CPU 高负载下被饿死（物理冻结）。恢复后 plant 会以停摆前的
+  // 旧速度滑行，在弯道处会冲进墙袋楔死。检测到停摆立即零速刹车，
+  // 恢复后的滑行距离只剩 plant 滤波器本身的制动距离。
+  if (has_last_pos_ && speed_now > 0.15) {
+    const double dp = std::hypot(x - last_pos_x_, y - last_pos_y_);
+    if (dp < 0.01) {
+      if (stall_since_.nanoseconds() == 0) {
+        stall_since_ = now;
+      } else if ((now - stall_since_).seconds() > 0.3) {
+        stall_brake_ = true;
+      }
+    } else {
+      stall_since_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+      stall_brake_ = false;
+    }
+  } else if (stall_brake_ && speed_now <= 0.15) {
+    // 刹车生效（plant 已停）后释放，恢复跟踪——
+    // 否则位置不动无法满足释放条件，刹车永久卡死
+    stall_brake_ = false;
+    stall_since_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+  }
+  last_pos_x_ = x;
+  last_pos_y_ = y;
+  has_last_pos_ = true;
+
   // 导航姿态：云台参考角以小步进平滑转向前瞻点处的路径朝向，底盘(mode=1)跟随，
   // 车体始终顺着走廊方向。云台 mode=3 是瞬时设置，若整段跳变（45°/90°），
   // TF 滞后（30 Hz，最长 ~50 ms）期间的 1~2 个控制周期里速度指令系会被
   // 错误旋转整个跳变角，机器人朝错误方向冲一小段——这正是偶发卡墙的根源。
-  // 每周期最多步进 pose_max_step_rad（与底盘 3 rad/s 跟随速度匹配），
-  // 把瞬时误差限制在一步以内。
+  // 步进按「路径前进距离」门控（每 0.1 m 或停住时步进一次，每次 ≤ pose_max_step_rad）：
+  // 仿真卡顿变慢时步进也随之变慢，底盘 3 rad/s 的跟随永远跟得上，
+  // 车体不会在弯道中落后成 45° 斜姿卡进墙袋。
   if (lock_nav_pose_ && gimbal_pub_ && heading_.size() > la_seg) {
-    const double target = heading_[la_seg];
-    const double delta = angleDiff(target, last_pub_heading_rad_);
-    if (std::fabs(delta) > 0.02) {   // >1° 才发，避免稳态刷屏
-      const double step = std::clamp(delta, -pose_max_step_rad_, pose_max_step_rad_);
-      last_pub_heading_rad_ += step;
-      robot_msg::msg::GimbalControlMsg gimbal;
-      gimbal.mode = 3;                    // yaw 指定角度
-      gimbal.big_yaw = static_cast<float>(last_pub_heading_rad_ * 180.0 / M_PI);
-      robot_msg::msg::ChassisModeMsg chassis;
-      chassis.mode = 1;                   // 底盘跟随云台
-      chassis.is_stop = false;
-      chassis.rotate_velocity = 0.0f;
-      gimbal_pub_->publish(gimbal);
-      chassis_pub_->publish(chassis);
+    const double progress = arc_[near_idx] - last_step_arc_;
+    if (progress >= pose_step_arc_ || speed_now < 0.15) {
+      const double target = heading_[la_seg];
+      const double delta = angleDiff(target, last_pub_heading_rad_);
+      if (std::fabs(delta) > 0.02) {   // >1° 才发，避免稳态刷屏
+        const double step = std::clamp(delta, -pose_max_step_rad_, pose_max_step_rad_);
+        last_pub_heading_rad_ += step;
+        publishNavPose();
+      }
+      last_step_arc_ = arc_[near_idx];
+    }
+    // 周期重发（0.5 s）：仿真器晚于控制器启动、或消息丢失时，
+    // 底盘会在收到第一条姿态指令前一直以 3 rad/s 自旋（相位彩票），
+    // 周期重发保证姿态指令尽快生效。
+    if (last_pose_pub_time_.nanoseconds() == 0 ||
+        (now - last_pose_pub_time_).seconds() > 0.5)
+    {
+      publishNavPose();
+      last_pose_pub_time_ = now;
     }
   }
 
   const double ex = la.x - x;
   const double ey = la.y - y;
 
-  // 3) 终点减速
-  const double v_goal = goal_gain_ * remaining + goal_end_vel_;
+  // 3) 终点减速：带 plant 滞后补偿的运动学停车剖面。
+  //    v = √(2·a·max(0, r − τ·v))：按当前速度把停车距离外推 τ·v，
+  //    保证 plant 速度滞后不会把机器人带过终点线。
+  const double r_eff = std::max(0.0, remaining - goal_lag_ * speed_now);
+  const double v_goal = std::sqrt(2.0 * goal_decel_ * r_eff);
 
   // 4) 曲率限速剖面（含减速约束），保证直线段跑满 max_vel、
   //    弯道按 plant 加速度能力提前减速
   double v_limit = std::min(v_goal, speedProfile(near_idx, v_goal));
+
+  // 物理停摆刹车：立即零速，防止恢复后旧速度滑行冲墙
+  if (stall_brake_) {
+    v_limit = 0.0;
+  }
 
   // 5) 贴墙紧急限速：机器人/前瞻点附近净空过低时降速，
   //    防止偏离路径时楔进墙袋
@@ -511,6 +603,46 @@ geometry_msgs::msg::TwistStamped PidController::computeVelocityCommands(
     }
   }
 
+  // 5.5) 卡死检测与贴墙脱困：指令明显但机器人实际不动（楔墙/沿墙滑行）
+  //       持续 stuck_time_ 秒判定卡死，放弃路径跟踪，朝 8 个采样方向中
+  //       净空最大的方向以 escape_speed_ 漂离；净空恢复到
+  //       escape_clear_dist_ 后退出脱困、恢复跟踪。
+  //       按"卡死"触发而非按净空触发，避免在对角窄道（净空 0.35~0.45）
+  //       正常行驶时误触发。
+  double ux = 0.0, uy = 0.0;
+  bool escaping = false;
+  if (has_esdf_) {
+    const double c_self = esdfClearance(x, y);
+    if (speed_now < 0.12 && v_limit > 0.25) {
+      if (stuck_since_.nanoseconds() == 0) {
+        stuck_since_ = now;
+      } else if ((now - stuck_since_).seconds() > stuck_time_) {
+        escaping = true;
+      }
+    } else {
+      stuck_since_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    }
+    if (escaping) {
+      double best = c_self;
+      double bx = 0.0, by = 0.0;
+      for (int k = 0; k < 8; ++k) {
+        const double a = k * M_PI / 4.0;
+        const double ck = esdfClearance(x + std::cos(a) * 0.15, y + std::sin(a) * 0.15);
+        if (ck > best) {
+          best = ck;
+          bx = std::cos(a);
+          by = std::sin(a);
+        }
+      }
+      ux = bx * escape_speed_;
+      uy = by * escape_speed_;
+      iex_ = iey_ = 0.0;
+      if (c_self > escape_clear_dist_) {
+        escaping = false;
+      }
+    }
+  }
+
   // 6) PID 决定期望速度的方向（前瞻点误差作为跟踪误差，
   //    积分项消除转弯时的稳态横向偏差）
   //    首周期/路径跳变/接近终点时清积分，防止过冲
@@ -522,20 +654,22 @@ geometry_msgs::msg::TwistStamped PidController::computeVelocityCommands(
   prev_ex_ = ex;
   prev_ey_ = ey;
 
-  iex_ += ex * dt;
-  iey_ += ey * dt;
-  iex_ = std::clamp(iex_, -ki_max_, ki_max_);
-  iey_ = std::clamp(iey_, -ki_max_, ki_max_);
+  if (!escaping) {
+    iex_ += ex * dt;
+    iey_ += ey * dt;
+    iex_ = std::clamp(iex_, -ki_max_, ki_max_);
+    iey_ = std::clamp(iey_, -ki_max_, ki_max_);
 
-  double ux = kp_ * ex + ki_ * iex_;
-  double uy = kp_ * ey + ki_ * iey_;
+    ux = kp_ * ex + ki_ * iex_;
+    uy = kp_ * ey + ki_ * iey_;
 
-  // 7) 速度大小显式取速度剖面（巡航/转弯/终点/贴墙），方向保持 PID 输出方向。
-  //    这样直线段能尽快到达巡航速度，不被 kp*|e| 隐式压住
-  const double u_norm = std::hypot(ux, uy);
-  if (u_norm > 1e-6) {
-    ux *= v_limit / u_norm;
-    uy *= v_limit / u_norm;
+    // 7) 速度大小显式取速度剖面（巡航/转弯/终点/贴墙），方向保持 PID 输出方向。
+    //    这样直线段能尽快到达巡航速度，不被 kp*|e| 隐式压住。
+    const double u_norm = std::hypot(ux, uy);
+    if (u_norm > 1e-6) {
+      ux *= v_limit / u_norm;
+      uy *= v_limit / u_norm;
+    }
   }
 
   // 8) map 系 -> base_link 系（用预测的执行时刻 yaw 旋转，补偿云台自旋时延）

@@ -107,8 +107,10 @@ private:
   double corner_lat_accel_{1.5};  // 转弯允许的最大向心加速度 m/s^2（与仿真加速度上限一致）
   double speed_horizon_{3.0};     // 速度剖面前瞻弧长 m
   double decel_accel_{1.8};       // 剖面反向收紧用的减速能力 m/s^2（留裕量）
-  double goal_gain_{1.0};   // 终点减速：v = gain*剩余距离 + end_vel
-  double goal_end_vel_{0.05};     // 终点减速的末端速度 m/s
+  double goal_gain_{1.0};   // 终点减速增益（保留兼容，见 goal_decel_）
+  double goal_end_vel_{0.05};     // 终点减速的末端速度 m/s（保留兼容）
+  double goal_decel_{0.8};        // 终点停车剖面的减速度 m/s^2
+  double goal_lag_{0.35};         // 终点停车剖面的滞后补偿 s
   double stop_dist_{0.03};  // 距终点小于该距离时输出零速 m
   double shortcut_dev_{0.15};     // 路径捷径允许的最大偏离 m
   int smooth_window_{7};    // 平滑窗口半径（点数）
@@ -119,12 +121,27 @@ private:
   double min_path_clearance_{0.55};  // 平滑路径点的最小净空 m（不足则拉回未平滑位置）
   double gap_crawl_dist_{0.55};      // 前瞻点净空低于该值时蠕行 m
   double gap_crawl_speed_{0.4};      // 蠕行速度 m/s
+  double decel_lag_dist_{0.45};      // 减速约束前移量 m（补偿 plant 速度响应滞后）
+  double pocket_check_dist_{0.8};    // 口袋检测：沿超调方向前方探测距离 m
+  double pocket_clearance_{0.55};    // 口袋判定净空阈值 m
+  double pocket_speed_{0.4};         // 口袋/窄道蠕行速度 m/s
+  double stuck_time_{0.8};           // 卡死判定：指令明显但不动持续该时长 s
+  double escape_clear_dist_{0.45};   // 脱困退出：净空恢复到该值 m
+  double escape_speed_{0.3};         // 脱困漂离速度 m/s
+  double pose_step_arc_{0.10};       // 云台参考角步进的路径前进距离门控 m
 
   // ---- 运行状态 ----
   double iex_{0.0}, iey_{0.0};    // 积分项
   double prev_ex_{0.0}, prev_ey_{0.0};
   double last_yaw_{0.0};          // 上次云台 yaw
   double yaw_rate_est_{0.0};      // 云台 yaw 角速度估计 rad/s
+  double last_step_arc_{-1e9};    // 上次云台参考角步进时最近点的弧长
+  rclcpp::Time last_pose_pub_time_;   // 上次周期重发姿态指令的时间
+  double last_pos_x_{0.0}, last_pos_y_{0.0};  // 上次机器人位置（停摆检测）
+  bool has_last_pos_{false};
+  rclcpp::Time stall_since_;      // 停摆开始时间
+  bool stall_brake_{false};       // 停摆刹车标志
+  rclcpp::Time stuck_since_;      // 卡死检测开始时间
   rclcpp::Time last_time_;
   bool has_last_time_{false};
 };
