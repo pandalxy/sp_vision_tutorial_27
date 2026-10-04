@@ -10,10 +10,12 @@ WSL_GPU_ENV=""
 if grep -qi microsoft /proc/version 2>/dev/null; then
     WSL_GPU_ENV='export GALLIUM_DRIVER=d3d12; export MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA;'
 fi
+# 禁用 FastDDS 共享内存传输，避免消息延迟/丢失导致导航滞后撞墙
+export FASTRTPS_DEFAULT_PROFILES_FILE="$WS_DIR/bash/fastdds_no_shm.xml"
 open_terminal() {
     local title="$1"
     local cmd="$2"
-    local full_cmd="${WSL_GPU_ENV} source $SETUP_FILE && $cmd; exec bash"
+    local full_cmd="${WSL_GPU_ENV} export FASTRTPS_DEFAULT_PROFILES_FILE=$WS_DIR/bash/fastdds_no_shm.xml && source $SETUP_FILE && $cmd; exec bash"
     if command -v gnome-terminal &>/dev/null; then
         gnome-terminal --title="$title" -- bash -c "$full_cmd" &
     elif command -v xterm &>/dev/null; then
