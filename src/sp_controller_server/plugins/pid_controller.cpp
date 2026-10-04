@@ -438,14 +438,36 @@ geometry_msgs::msg::TwistStamped PidController::computeVelocityCommands(
   cmd_vel.header.stamp = node_->now();
   cmd_vel.header.frame_id = base_frame_id_;
 
-  // 没有路径时输出零速
-  if (plan_.poses.size() < 2 || arc_.empty()) {
-    return cmd_vel;
-  }
-
   const double x = pose.pose.position.x;
   const double y = pose.pose.position.y;
   const double yaw = tf2::getYaw(pose.pose.orientation);
+  const double speed_now = std::hypot(velocity.linear.x, velocity.linear.y);
+
+  // 没有路径时：仍运行卡死脱困。规划失败（机器人楔进 lethal 区）时
+  // BT 会反复重试规划，此时机器人必须能漂回自由区，规划才能恢复。
+  if (plan_.poses.size() < 2 || arc_.empty()) {
+    if (has_esdf_) {
+      const double c_self = esdfClearance(x, y);
+      if (speed_now < 0.12 && c_self < escape_clear_dist_) {
+        double best = c_self;
+        double bx = 0.0, by = 0.0;
+        for (int k = 0; k < 8; ++k) {
+          const double a = k * M_PI / 4.0;
+          const double ck = esdfClearance(x + std::cos(a) * 0.15, y + std::sin(a) * 0.15);
+          if (ck > best) {
+            best = ck;
+            bx = std::cos(a);
+            by = std::sin(a);
+          }
+        }
+        const double cy = std::cos(yaw);
+        const double sy = std::sin(yaw);
+        cmd_vel.twist.linear.x = cy * bx * escape_speed_ + sy * by * escape_speed_;
+        cmd_vel.twist.linear.y = -sy * bx * escape_speed_ + cy * by * escape_speed_;
+      }
+    }
+    return cmd_vel;
+  }
 
   // 控制周期 dt（用节点时钟兜底）
   const rclcpp::Time now = node_->now();
@@ -488,7 +510,6 @@ geometry_msgs::msg::TwistStamped PidController::computeVelocityCommands(
   }
 
   // 2) 纯追踪前瞻点（前瞻距离随速度增大，高速时更稳、低速转弯时贴路径）
-  const double speed_now = std::hypot(velocity.linear.x, velocity.linear.y);
   const double lookahead = lookahead_base_ + lookahead_gain_ * speed_now;
   bool at_end = false;
   std::size_t la_seg = 0;
