@@ -10,10 +10,10 @@
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
+#include <robot_msg/msg/gimbal_control_msg.hpp>
+#include <robot_msg/msg/chassis_mode_msg.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <tf2_ros/buffer.h>
-#include <robot_msg/msg/chassis_mode_msg.hpp>
-#include <robot_msg/msg/gimbal_control_msg.hpp>
 
 #include "sp_controller_server/controller_plugin.hpp"
 
@@ -28,8 +28,11 @@ namespace pid_controller {
 // 3. 方向由 e（可加 PID 项，实测积分项在弯道会引起指令方向卷绕，默认 ki=0）决定；
 // 4. 速度大小显式取速度剖面：min(巡航 max_vel, 弯道曲率限速(含减速约束), 终点减速)，
 //    另可选 ESDF 贴墙紧急限速（默认关闭）；
-// 5. 用「预测的执行时刻云台 yaw」把速度旋转到 base_link 系下发，
-//    补偿云台持续自旋（scan 1 rad/s）导致的执行时延方向漂移。
+// 5. 云台自旋时用「预测的执行时刻 yaw」把速度旋转到 base_link 系下发，
+//    补偿扫描自旋（1 rad/s）导致的执行时延漂移；
+// 6. 导航期间锁定姿态：云台参考角以小步进平滑转向路径朝向（避免 mode=3
+//    瞬时跳变在 TF 滞后期间造成整段跳变角的方向突刺），底盘 mode=1 跟随，
+//    方形车体始终顺走廊方向（横向占地恒 0.5 m）。
 class PidController : public sp_controller_server::ControllerPlugin {
 public:
   PidController() = default;
@@ -78,14 +81,14 @@ private:
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr local_path_pub_;
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr debug_pub_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr esdf_sub_;
-
-  // 导航姿态：把底盘朝向平滑领到路径方向（云台 mode=3 小步进 + 底盘 mode=1 跟随）。
-  // 底盘默认 3 rad/s 自旋，碰墙瞬间朝向随机，45° 时方形占地 0.707 m
-  // 会卡死窄通道（相位彩票）。让底盘始终顺着走廊方向可彻底消除。
+  // 导航姿态：底盘跟随云台参考角（= 路径朝向），像车一样让车体
+  // 始终顺着走廊方向（方形车体横向占地恒为 0.5 m，所有走廊都能过）
   rclcpp::Publisher<robot_msg::msg::GimbalControlMsg>::SharedPtr gimbal_pub_;
   rclcpp::Publisher<robot_msg::msg::ChassisModeMsg>::SharedPtr chassis_pub_;
-  bool lock_nav_pose_{true};        // 是否在导航期间控制云台/底盘姿态
-  double last_pub_heading_rad_{0.0};  // 最近一次发布的云台参考角
+  bool lock_nav_pose_{true};      // 是否在导航期间控制云台/底盘姿态
+  double last_pub_heading_rad_{0.0};  // 最近一次发布的云台参考角 rad
+  double pose_max_step_rad_{0.14};    // 云台参考角每周期最大步进 rad（~8°，匹配底盘 3 rad/s 跟随）
+  void publishNavPose();
 
   // ESDF 代价地图（/esdf_costmap：data = 净空距离*100 的 int8 栅格）
   nav_msgs::msg::OccupancyGrid esdf_;
@@ -113,21 +116,12 @@ private:
   double pred_latency_{0.06};     // 云台 yaw 预测时延 s（补偿自旋导致的执行时延）
   double wall_brake_dist_{0.55};  // 距墙净空低于该值开始限速 m
   double wall_speed_gain_{2.0};   // 贴墙限速：v = 0.5 + gain*(d - 0.35)
-  double gap_crawl_dist_{0.60};   // 路径前方点距墙净空低于该值时蠕行 m
-  double gap_crawl_speed_{0.35};  // 紧窄段蠕行速度 m/s
-  double pose_max_step_rad_{0.14};  // 云台参考角每周期最大步进 rad（约 8°）
-  double ct_gain_{1.5};   // 横向积分增益（抵消滞后横向偏移）
-  double ct_max_{0.8};    // 横向积分饱和上限 m·s
-  double rep_gain_{2.0};  // 贴墙排斥力场增益
+  double min_path_clearance_{0.55};  // 平滑路径点的最小净空 m（不足则拉回未平滑位置）
+  double gap_crawl_dist_{0.55};      // 前瞻点净空低于该值时蠕行 m
+  double gap_crawl_speed_{0.4};      // 蠕行速度 m/s
 
   // ---- 运行状态 ----
   double iex_{0.0}, iey_{0.0};    // 积分项
-  double ict_{0.0};              // 横向（cross-track）积分项
-  double stuck_t_{0.0};           // 卡死累计时间 s
-  bool recovering_{false};        // 倒车脱困中
-  int recover_stage_{1};          // 1=沿路径倒车 2=横向挪动
-  double recover_t_{0.0};         // 脱困已耗时 s
-  double recover_dist_{0.0};      // 脱困已后退距离 m
   double prev_ex_{0.0}, prev_ey_{0.0};
   double last_yaw_{0.0};          // 上次云台 yaw
   double yaw_rate_est_{0.0};      // 云台 yaw 角速度估计 rad/s

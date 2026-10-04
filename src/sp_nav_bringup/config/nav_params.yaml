@@ -43,23 +43,21 @@ controller_server:
       kd: 0.0
       ki_max: 0.5
       lookahead_base: 0.25
-      lookahead_gain: 0.55
+      lookahead_gain: 0.10
       max_vel: 1.8
-      corner_lat_accel: 0.9
+      corner_lat_accel: 1.5
       speed_horizon: 3.0
       decel_accel: 1.8
       pred_latency: 0.06
       lock_nav_pose: true
-      ct_gain: 1.5
-      rep_gain: 2.0
-      ct_max: 0.8
       pose_max_step_rad: 0.14
-      wall_brake_dist: 0.40
-      gap_crawl_dist: 0.60
-      gap_crawl_speed: 0.35
+      wall_brake_dist: 0.5
+      min_path_clearance: 0.55
+      gap_crawl_dist: 0.55
+      gap_crawl_speed: 0.4
       wall_speed_gain: 2.0
-      goal_gain: 1.0
-      goal_end_vel: 0.05
+      goal_gain: 1.6
+      goal_end_vel: 0.03
       stop_dist: 0.03
       shortcut_dev: 0.15
       smooth_window: 7
