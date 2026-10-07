@@ -49,7 +49,7 @@ controller_server:
       speed_horizon: 3.0
       decel_accel: 1.8
       pred_latency: 0.06
-      lock_nav_pose: true
+      lock_nav_pose: false
       pose_max_step_rad: 0.14
       wall_brake_dist: 0.42
       min_path_clearance: 0.55

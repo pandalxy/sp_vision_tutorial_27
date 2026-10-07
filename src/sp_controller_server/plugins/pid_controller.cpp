@@ -443,32 +443,6 @@ geometry_msgs::msg::TwistStamped PidController::computeVelocityCommands(
   const double yaw = tf2::getYaw(pose.pose.orientation);
   const double speed_now = std::hypot(velocity.linear.x, velocity.linear.y);
 
-  // 没有路径时：仍运行卡死脱困。规划失败（机器人楔进 lethal 区）时
-  // BT 会反复重试规划，此时机器人必须能漂回自由区，规划才能恢复。
-  if (plan_.poses.size() < 2 || arc_.empty()) {
-    if (has_esdf_) {
-      const double c_self = esdfClearance(x, y);
-      if (speed_now < 0.12 && c_self < escape_clear_dist_) {
-        double best = c_self;
-        double bx = 0.0, by = 0.0;
-        for (int k = 0; k < 8; ++k) {
-          const double a = k * M_PI / 4.0;
-          const double ck = esdfClearance(x + std::cos(a) * 0.15, y + std::sin(a) * 0.15);
-          if (ck > best) {
-            best = ck;
-            bx = std::cos(a);
-            by = std::sin(a);
-          }
-        }
-        const double cy = std::cos(yaw);
-        const double sy = std::sin(yaw);
-        cmd_vel.twist.linear.x = cy * bx * escape_speed_ + sy * by * escape_speed_;
-        cmd_vel.twist.linear.y = -sy * bx * escape_speed_ + cy * by * escape_speed_;
-      }
-    }
-    return cmd_vel;
-  }
-
   // 控制周期 dt（用节点时钟兜底）
   const rclcpp::Time now = node_->now();
   const bool first_cycle = !has_last_time_;
@@ -482,7 +456,7 @@ geometry_msgs::msg::TwistStamped PidController::computeVelocityCommands(
     dt = 0.02;
   }
 
-  // 云台自旋补偿（仅在云台自由自旋、未锁定时生效）：
+  // 云台自旋补偿（云台自由自旋、未锁定姿态时生效）：
   // 云台扫描自旋时（scan_speed 1 rad/s），cmd_vel 在 base_link 系下被
   // 执行时刻的 yaw 旋转到世界系。若只用 TF 读到 yaw 旋转，几十 ms 的
   // 通信/执行时延会引入与速度成正比的横向漂移，越跑越偏甚至撞墙。
@@ -498,6 +472,35 @@ geometry_msgs::msg::TwistStamped PidController::computeVelocityCommands(
     yaw_cmd = yaw + yaw_rate_est_ * pred_latency_;
   }
   last_yaw_ = yaw;
+
+  // 没有路径时：仍运行卡死脱困。规划失败（机器人楔进 lethal 区）时
+  // BT 会反复重试规划，此时机器人必须能漂回自由区，规划才能恢复。
+  // 注意：云台扫描自旋时，脱困方向必须用预测 yaw 旋转——若用原始 yaw，
+  // 漂移方向会跟着云台 1 rad/s 打转，脱困净位移趋近于零。
+  if (plan_.poses.size() < 2 || arc_.empty()) {
+    if (has_esdf_) {
+      const double c_self = esdfClearance(x, y);
+      if (speed_now < 0.12 && c_self < escape_clear_dist_) {
+        double best = c_self;
+        double bx = 0.0, by = 0.0;
+        for (int k = 0; k < 8; ++k) {
+          const double a = k * M_PI / 4.0;
+          const double ck = esdfClearance(x + std::cos(a) * 0.15, y + std::sin(a) * 0.15);
+          if (ck > best) {
+            best = ck;
+            bx = std::cos(a);
+            by = std::sin(a);
+          }
+        }
+        const double cy = std::cos(yaw_cmd);
+        const double sy = std::sin(yaw_cmd);
+        cmd_vel.twist.linear.x = cy * bx * escape_speed_ + sy * by * escape_speed_;
+        cmd_vel.twist.linear.y = -sy * bx * escape_speed_ + cy * by * escape_speed_;
+      }
+    }
+    return cmd_vel;
+  }
+
 
   // 1) 最近点与剩余弧长
   const std::size_t near_idx = findNearestIndex(x, y);
