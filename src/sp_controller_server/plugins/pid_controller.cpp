@@ -537,6 +537,9 @@ geometry_msgs::msg::TwistStamped PidController::computeVelocityCommands(
     stall_brake_ = false;
     stall_since_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
   }
+  if (has_last_pos_) {
+    travel_dist_ += std::hypot(x - last_pos_x_, y - last_pos_y_);
+  }
   last_pos_x_ = x;
   last_pos_y_ = y;
   has_last_pos_ = true;
@@ -545,11 +548,14 @@ geometry_msgs::msg::TwistStamped PidController::computeVelocityCommands(
   // 车体始终顺着走廊方向。云台 mode=3 是瞬时设置，若整段跳变（45°/90°），
   // TF 滞后（30 Hz，最长 ~50 ms）期间的 1~2 个控制周期里速度指令系会被
   // 错误旋转整个跳变角，机器人朝错误方向冲一小段——这正是偶发卡墙的根源。
-  // 步进按「路径前进距离」门控（每 0.1 m 或停住时步进一次，每次 ≤ pose_max_step_rad）：
+  // 步进按「累计行驶里程」门控（每 0.1 m 或停住时步进一次，每次 ≤ pose_max_step_rad）：
   // 仿真卡顿变慢时步进也随之变慢，底盘 3 rad/s 的跟随永远跟得上，
   // 车体不会在弯道中落后成 45° 斜姿卡进墙袋。
+  // 注意：不能用 arc_[near_idx] 门控——BT 每 100 ms 重规划一次，新路径的
+  // 弧长从 0 重新计起，而上次步进的弧长不会随之清零，progress 恒为负，
+  // 云台参考角从此冻结、车体不再旋转，过弯直冲墙楔死（"行走时自转停止"）。
   if (lock_nav_pose_ && gimbal_pub_ && heading_.size() > la_seg) {
-    const double progress = arc_[near_idx] - last_step_arc_;
+    const double progress = travel_dist_ - last_step_dist_;
     if (progress >= pose_step_arc_ || speed_now < 0.15) {
       const double target = heading_[la_seg];
       const double delta = angleDiff(target, last_pub_heading_rad_);
@@ -558,7 +564,7 @@ geometry_msgs::msg::TwistStamped PidController::computeVelocityCommands(
         last_pub_heading_rad_ += step;
         publishNavPose();
       }
-      last_step_arc_ = arc_[near_idx];
+      last_step_dist_ = travel_dist_;
     }
     // 周期重发（0.5 s）：仿真器晚于控制器启动、或消息丢失时，
     // 底盘会在收到第一条姿态指令前一直以 3 rad/s 自旋（相位彩票），

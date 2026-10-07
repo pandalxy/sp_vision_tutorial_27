@@ -128,14 +128,15 @@ private:
   double stuck_time_{0.8};           // 卡死判定：指令明显但不动持续该时长 s
   double escape_clear_dist_{0.45};   // 脱困退出：净空恢复到该值 m
   double escape_speed_{0.3};         // 脱困漂离速度 m/s
-  double pose_step_arc_{0.10};       // 云台参考角步进的路径前进距离门控 m
+  double pose_step_arc_{0.10};       // 云台参考角步进的累计行驶里程门控 m
 
   // ---- 运行状态 ----
   double iex_{0.0}, iey_{0.0};    // 积分项
   double prev_ex_{0.0}, prev_ey_{0.0};
   double last_yaw_{0.0};          // 上次云台 yaw
   double yaw_rate_est_{0.0};      // 云台 yaw 角速度估计 rad/s
-  double last_step_arc_{-1e9};    // 上次云台参考角步进时最近点的弧长
+  double travel_dist_{0.0};       // 累计行驶里程 m（位置增量积分，重规划不重置）
+  double last_step_dist_{-1e9};   // 上次云台参考角步进时的累计里程 m
   rclcpp::Time last_pose_pub_time_;   // 上次周期重发姿态指令的时间
   double last_pos_x_{0.0}, last_pos_y_{0.0};  // 上次机器人位置（停摆检测）
   bool has_last_pos_{false};
