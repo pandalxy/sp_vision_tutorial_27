@@ -20,19 +20,22 @@
                               service_name="/set_control_enable"
                               bb_key="controller_enabled"/>
           </Sequence>
-          <!-- 规划失败时无限重试且保持控制器使能：
-               机器人楔进 lethal 区（如卡墙）时规划器会一直报
-               “Start is in blocked cell”，此时控制器必须保持运行，
-               让贴墙脱困逻辑把机器人漂回自由区，规划恢复后任务继续。
-               若在此禁控（强制零速），脱困无法执行，任务必死。 -->
-          <RetryUntilSuccessful num_attempts="-1">
-            <Delay delay_msec="100">
-              <nav_ComputePathService service_name="make_plan"
-                                  start="{start_pose}"
-                                  goal="{goal_pose}"
-                                  path="{global_plan}"/>
-            </Delay>
-          </RetryUntilSuccessful>
+          <Sequence>
+            <nav_SetControlEnable enable="false"
+                              service_name="/set_control_enable"
+                              bb_key="controller_enabled"/>
+            <RetryUntilSuccessful num_attempts="100">
+              <Delay delay_msec="100">
+                <nav_ComputePathService service_name="make_plan"
+                                    start="{start_pose}"
+                                    goal="{goal_pose}"
+                                    path="{global_plan}"/>
+              </Delay>
+            </RetryUntilSuccessful>
+            <nav_SetControlEnable enable="true"
+                              service_name="/set_control_enable"
+                              bb_key="controller_enabled"/>
+          </Sequence>
         </Fallback>
       </nav_RateControl>
       <nav_NavStateTrack goal_pose="{goal_pose}"
